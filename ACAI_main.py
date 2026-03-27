@@ -17,7 +17,7 @@ from mediapipe.tasks.python import vision
 # CONFIG
 # ============================================================
 MODEL_PATH = "pose_landmarker_full.task"   # download this .task model file
-VIDEO_NAME = "Luis_trim_1080.mp4"
+VIDEO_NAME = "luis_trim_lesson.mp4"
 BLUR = 56                                  # percentage of image height to blur from bottom
 NUM_POSES = 1
 MIN_POSE_DET_CONF = 0.2
@@ -238,9 +238,30 @@ def areasofinterest(video_name):
     rectangles = []
     drawing = False
     temp_points = []
+    current_mouse = [0, 0]
+
+    vid = cv2.VideoCapture(video_name)
+    if not vid.isOpened():
+        raise RuntimeError(f"Could not open video for AOI selection: {video_name}")
+
+    ret, first_frame = vid.read()
+    vid.release()
+
+    if not ret:
+        raise RuntimeError("Could not read first frame for AOI selection.")
+
+    # --- Resize for display, keep scale factors to map coords back ---
+    orig_h, orig_w = first_frame.shape[:2]
+    display_w = 1280
+    scale = display_w / orig_w
+    display_h = int(orig_h * scale)
+    display_frame = cv2.resize(first_frame, (display_w, display_h))
 
     def draw_rectangle(event, x, y, flags, param):
         nonlocal drawing, temp_points, rectangles
+
+        current_mouse[0] = x
+        current_mouse[1] = y
 
         if event == cv2.EVENT_LBUTTONDOWN:
             drawing = True
@@ -253,19 +274,13 @@ def areasofinterest(video_name):
             if len(temp_points) == 2:
                 rect = ensure_rect(temp_points[0], temp_points[1])
                 rectangles.append(rect)
-                print("Added AOI:", rect)
+                print("Added AOI (display coords):", rect)
 
-    vid = cv2.VideoCapture(video_name)
-    if not vid.isOpened():
-        raise RuntimeError(f"Could not open video for AOI selection: {video_name}")
+    cv2.namedWindow("Define Areas of Interest")
+    cv2.setMouseCallback("Define Areas of Interest", draw_rectangle)
 
     while True:
-        ret, frame = vid.read()
-        if not ret:
-            break
-
-        cv2.namedWindow("Define Areas of Interest")
-        cv2.setMouseCallback("Define Areas of Interest", draw_rectangle)
+        frame = display_frame.copy()
 
         if len(rectangles) == 0:
             prompt = "Mark out teaching slides"
@@ -276,7 +291,7 @@ def areasofinterest(video_name):
         else:
             prompt = "Mark out whiteboard area(s), then press q"
 
-        cv2.putText(frame, prompt, (10, 30), cv2.QT_FONT_NORMAL, 0.8, (255, 255, 255), 1)
+        cv2.putText(frame, prompt, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
 
         labels = ["Teaching Slides", "Students", "Computer", "Whiteboard"]
         for i, rect in enumerate(rectangles):
@@ -285,22 +300,28 @@ def areasofinterest(video_name):
             cv2.rectangle(frame, rect[0], rect[1], (0, 0, 255), -1)
             cx = int((rect[0][0] + rect[1][0]) / 2)
             cy = int((rect[0][1] + rect[1][1]) / 2)
-            cv2.putText(frame, label, (cx, cy), cv2.QT_FONT_NORMAL, 0.4, (255, 255, 255), 1)
-            frame = cv2.addWeighted(
-                overlay,
-                AOI_SELECTION_BASE_WEIGHT,
-                frame,
-                AOI_SELECTION_FILL_WEIGHT,
-                0
-            )
+            cv2.putText(frame, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            frame = cv2.addWeighted(overlay, AOI_SELECTION_BASE_WEIGHT, frame, AOI_SELECTION_FILL_WEIGHT, 0)
+
+        # Live drag preview
+        if drawing and len(temp_points) == 1:
+            preview_rect = ensure_rect(temp_points[0], (current_mouse[0], current_mouse[1]))
+            cv2.rectangle(frame, preview_rect[0], preview_rect[1], (0, 255, 255), 2)
 
         cv2.imshow("Define Areas of Interest", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
-    vid.release()
     cv2.destroyAllWindows()
-    return rectangles
+
+    # --- Scale AOI coords back to original resolution ---
+    scaled = []
+    for (x1, y1), (x2, y2) in rectangles:
+        scaled.append((
+            (int(x1 / scale), int(y1 / scale)),
+            (int(x2 / scale), int(y2 / scale))
+        ))
+    return scaled
 
 
 # ============================================================
