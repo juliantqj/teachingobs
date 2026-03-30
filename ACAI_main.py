@@ -17,12 +17,13 @@ from mediapipe.tasks.python import vision
 # CONFIG
 # ============================================================
 MODEL_PATH = "pose_landmarker_full.task"   # download this .task model file
-VIDEO_NAME = "luis_trim_lesson.mp4"
+VIDEO_NAME = r"C:\Users\USER\PycharmProjects\teachingobs\videos\NIE_classroom\luis_1_trim_video.mp4"
 BLUR = 56                                  # percentage of image height to blur from bottom
 NUM_POSES = 1
 MIN_POSE_DET_CONF = 0.2
 MIN_POSE_PRES_CONF = 0.2
 MIN_TRACK_CONF = 0.2
+SHOW_PREVIEW = False                       # set False to run in background without display window
 
 OUTPUT_VIDEO = f"{VIDEO_NAME}_out.mp4"
 OUTPUT_LANDMARK_CSV = "reportsourcefile_landmarkcoordinates.csv"
@@ -30,9 +31,9 @@ OUTPUT_TEACHINGSTYLE_CSV = "teachingstyle_output.csv"
 OUTPUT_COG_CSV = "reportsourcefile_center_of_gravity.csv"
 
 # AOI transparency settings
-AOI_SELECTION_BASE_WEIGHT = 0.9   # 70% original image
-AOI_SELECTION_FILL_WEIGHT = 0.1   # 30% red overlay
-AOI_DISPLAY_BASE_WEIGHT = 0.9     # same for display during processing
+AOI_SELECTION_BASE_WEIGHT = 0.9
+AOI_SELECTION_FILL_WEIGHT = 0.1
+AOI_DISPLAY_BASE_WEIGHT = 0.9
 AOI_DISPLAY_FILL_WEIGHT = 0.1
 
 
@@ -119,6 +120,10 @@ list_of_COG = []
 
 frame_width = 0
 frame_height = 0
+
+# ---- PATCH 1: GUI integration hooks (do not remove) ----
+SKIP_AOI_SELECTION = False   # set True by GUI — AOIs injected via areasofinterest_list
+PROGRESS_CALLBACK = None     # optional callable(frame, total, fps) for GUI progress bar
 
 
 # ============================================================
@@ -250,7 +255,6 @@ def areasofinterest(video_name):
     if not ret:
         raise RuntimeError("Could not read first frame for AOI selection.")
 
-    # --- Resize for display, keep scale factors to map coords back ---
     orig_h, orig_w = first_frame.shape[:2]
     display_w = 1280
     scale = display_w / orig_w
@@ -303,7 +307,6 @@ def areasofinterest(video_name):
             cv2.putText(frame, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
             frame = cv2.addWeighted(overlay, AOI_SELECTION_BASE_WEIGHT, frame, AOI_SELECTION_FILL_WEIGHT, 0)
 
-        # Live drag preview
         if drawing and len(temp_points) == 1:
             preview_rect = ensure_rect(temp_points[0], (current_mouse[0], current_mouse[1]))
             cv2.rectangle(frame, preview_rect[0], preview_rect[1], (0, 255, 255), 2)
@@ -314,7 +317,6 @@ def areasofinterest(video_name):
 
     cv2.destroyAllWindows()
 
-    # --- Scale AOI coords back to original resolution ---
     scaled = []
     for (x1, y1), (x2, y2) in rectangles:
         scaled.append((
@@ -660,6 +662,7 @@ def blur_lower_region(frame):
 # ============================================================
 def main():
     global areasofinterest_list, frame_width, frame_height
+    global teaching_style_dict, landmark_coordinate_dict, list_of_COG
 
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(
@@ -667,10 +670,22 @@ def main():
             f"Download a Pose Landmarker .task model and place it next to this script."
         )
 
-    print("Select AOIs:")
-    print("1 = slides, 2 = students, 3 = computer, 4+ = whiteboards, then press q")
-    areasofinterest_list = areasofinterest(VIDEO_NAME)
-    print("AOIs:", areasofinterest_list)
+    # ---- PATCH 2: Reset dicts for clean runs when called multiple times ----
+    teaching_style_dict = {k: [] for k in teaching_style_dict}
+    landmark_coordinate_dict = {"frame": []}
+    for x in range(33):
+        landmark_coordinate_dict[f"lm{x}_x"] = []
+        landmark_coordinate_dict[f"lm{x}_y"] = []
+        landmark_coordinate_dict[f"lm{x}_z"] = []
+        landmark_coordinate_dict[f"lm{x}_visibility"] = []
+    list_of_COG = []
+
+    # ---- PATCH 3: Skip AOI selection when called from GUI ----
+    if not SKIP_AOI_SELECTION:
+        print("Select AOIs:")
+        print("1 = slides, 2 = students, 3 = computer, 4+ = whiteboards, then press q")
+        areasofinterest_list = areasofinterest(VIDEO_NAME)
+        print("AOIs:", areasofinterest_list)
 
     video = cv2.VideoCapture(VIDEO_NAME)
     if not video.isOpened():
@@ -706,58 +721,67 @@ def main():
     running_frame_count = 0
 
     with PoseLandmarker.create_from_options(options) as landmarker:
-        while video.isOpened():
-            start_time = datetime.datetime.now()
-            ok, frame = video.read()
-            if not ok:
-                break
+        with tqdm(total=total_frame_count, desc="Analyzing", unit="frame") as pbar:
+            while video.isOpened():
+                start_time = datetime.datetime.now()
+                ok, frame = video.read()
+                if not ok:
+                    break
 
-            running_frame_count += 1
-            print(f"{running_frame_count}/{total_frame_count} total frames analyzed.")
+                running_frame_count += 1
 
-            timestamp_ms = int((running_frame_count / max(video_fps, 1e-6)) * 1000)
+                timestamp_ms = int((running_frame_count / max(video_fps, 1e-6)) * 1000)
 
-            frame_out, landmarks_px, landmarks_norm, _ = detect_pose(frame, landmarker, timestamp_ms)
+                frame_out, landmarks_px, landmarks_norm, _ = detect_pose(frame, landmarker, timestamp_ms)
 
-            if landmarks_px is not None:
-                landmarks_history.append(landmarks_px)
-                if len(landmarks_history) > 60:
-                    landmarks_history.pop(0)
+                if landmarks_px is not None:
+                    landmarks_history.append(landmarks_px)
+                    if len(landmarks_history) > 60:
+                        landmarks_history.pop(0)
 
-                frame_out = classify_pose(
-                    landmarks_px,
-                    frame_out,
-                    landmarks_history,
-                    running_frame_count
-                )
+                    frame_out = classify_pose(
+                        landmarks_px,
+                        frame_out,
+                        landmarks_history,
+                        running_frame_count
+                    )
 
-                frame_out = track_cog(landmarks_px, frame_out)
+                    frame_out = track_cog(landmarks_px, frame_out)
 
-                append_landmark_row(running_frame_count, landmarks_norm, frame_width, frame_height)
-            else:
-                append_default_logs(running_frame_count)
-                append_landmark_row(running_frame_count, None, frame_width, frame_height)
+                    append_landmark_row(running_frame_count, landmarks_norm, frame_width, frame_height)
+                else:
+                    append_default_logs(running_frame_count)
+                    append_landmark_row(running_frame_count, None, frame_width, frame_height)
 
-            frame_out = draw_aois(frame_out)
-            frame_out = blur_lower_region(frame_out)
+                frame_out = draw_aois(frame_out)
+                frame_out = blur_lower_region(frame_out)
 
-            end_time = datetime.datetime.now()
-            delta = (end_time - start_time).total_seconds()
-            if delta > 0:
-                cv2.putText(frame_out, f"FPS: {1.0 / delta:.2f}", (10, frame_height - 20),
-                            cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
+                end_time = datetime.datetime.now()
+                delta = (end_time - start_time).total_seconds()
+                fps = 0.0
+                if delta > 0:
+                    fps = 1.0 / delta
+                    cv2.putText(frame_out, f"FPS: {fps:.2f}", (10, frame_height - 20),
+                                cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
+                    pbar.set_postfix(fps=f"{fps:.2f}")
 
-            cv2.imshow("Pose Detection", frame_out)
-            out.write(frame_out)
+                if SHOW_PREVIEW:
+                    cv2.imshow("Pose Detection", frame_out)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
 
-            export_csvs()
+                out.write(frame_out)
+                export_csvs()
+                pbar.update(1)
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+                # ---- PATCH 4: Report progress to GUI if callback is set ----
+                if PROGRESS_CALLBACK:
+                    PROGRESS_CALLBACK(running_frame_count, total_frame_count, fps)
 
     video.release()
     out.release()
-    cv2.destroyAllWindows()
+    if SHOW_PREVIEW:
+        cv2.destroyAllWindows()
 
     cog_x, cog_y, frames = [], [], []
     for i, value in enumerate(list_of_COG, start=1):
@@ -782,7 +806,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
-    
-    
-    
