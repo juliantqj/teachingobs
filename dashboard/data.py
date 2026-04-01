@@ -15,7 +15,9 @@ import pandas as pd
 # CONFIG
 # Phase 1: local path. Phase 2: change this one line only.
 # ============================================================
-OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
+
+OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"      # --> uncomment to run locally
+# OUTPUTS_DIR = Path("/home/jkomar/teachingobs/outputs")              # --> for running on pythonanywhere, default
 
 
 # ============================================================
