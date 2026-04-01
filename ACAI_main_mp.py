@@ -9,82 +9,88 @@ import json
 import os
 from enum import IntEnum
 
-from rtmlib import Body
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
 
 # ============================================================
 # CONFIG
 # ============================================================
-# RTMPose model paths — resolved dynamically from rtmlib cache
-# Works on any machine regardless of username or OS
-RTMPOSE_CACHE   = os.path.join(os.path.expanduser("~"), ".cache", "rtmlib", "hub", "checkpoints")
-RTMPOSE_DET     = os.path.join(RTMPOSE_CACHE, "yolox_x_8xb8-300e_humanart-a39d44ed.onnx")
-RTMPOSE_POSE    = os.path.join(RTMPOSE_CACHE, "rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.onnx")
-RTMPOSE_DEVICE  = "cuda"        # 'cuda' for GPU, 'cpu' fallback
-RTMPOSE_BACKEND = "onnxruntime"
+MODEL_PATH = "pose_landmarker_full.task"   # download this .task model file
 VIDEO_NAME = r"C:\Users\USER\PycharmProjects\teachingobs\videos\NIE_classroom\luis_1_trim_video.mp4"
-BLUR = 56                       # percentage of image height to blur from bottom
+BLUR = 56                                  # percentage of image height to blur from bottom
 NUM_POSES = 1
-SHOW_PREVIEW = False            # set False to run in background without display window
+MIN_POSE_DET_CONF = 0.2
+MIN_POSE_PRES_CONF = 0.2
+MIN_TRACK_CONF = 0.2
+SHOW_PREVIEW = False                       # set False to run in background without display window
 
-OUTPUT_VIDEO             = f"{VIDEO_NAME}_out.mp4"
-OUTPUT_LANDMARK_CSV      = "reportsourcefile_landmarkcoordinates.csv"
+OUTPUT_VIDEO = f"{VIDEO_NAME}_out.mp4"
+OUTPUT_LANDMARK_CSV = "reportsourcefile_landmarkcoordinates.csv"
 OUTPUT_TEACHINGSTYLE_CSV = "teachingstyle_output.csv"
-OUTPUT_COG_CSV           = "reportsourcefile_center_of_gravity.csv"
+OUTPUT_COG_CSV = "reportsourcefile_center_of_gravity.csv"
 
 # AOI transparency settings
 AOI_SELECTION_BASE_WEIGHT = 0.9
 AOI_SELECTION_FILL_WEIGHT = 0.1
-AOI_DISPLAY_BASE_WEIGHT   = 0.9
-AOI_DISPLAY_FILL_WEIGHT   = 0.1
+AOI_DISPLAY_BASE_WEIGHT = 0.9
+AOI_DISPLAY_FILL_WEIGHT = 0.1
 
 
 # ============================================================
-# LANDMARK ENUM — HALPE 26 (RTMPose)
+# LANDMARK ENUM
 # ============================================================
 class PoseLandmark(IntEnum):
-    NOSE          = 0
-    LEFT_EYE      = 1
-    RIGHT_EYE     = 2
-    LEFT_EAR      = 3
-    RIGHT_EAR     = 4
-    LEFT_SHOULDER = 5
-    RIGHT_SHOULDER= 6
-    LEFT_ELBOW    = 7
-    RIGHT_ELBOW   = 8
-    LEFT_WRIST    = 9
-    RIGHT_WRIST   = 10
-    LEFT_HIP      = 11
-    RIGHT_HIP     = 12
-    LEFT_KNEE     = 13
-    RIGHT_KNEE    = 14
-    LEFT_ANKLE    = 15
-    RIGHT_ANKLE   = 16
-    HEAD          = 17
-    NECK          = 18
-    HIP_CENTER    = 19
-    LEFT_BIG_TOE  = 20
-    RIGHT_BIG_TOE = 21
-    LEFT_SMALL_TOE= 22
-    RIGHT_SMALL_TOE=23
-    LEFT_HEEL     = 24
-    RIGHT_HEEL    = 25
-
-NUM_LANDMARKS = 26
+    NOSE = 0
+    LEFT_EYE_INNER = 1
+    LEFT_EYE = 2
+    LEFT_EYE_OUTER = 3
+    RIGHT_EYE_INNER = 4
+    RIGHT_EYE = 5
+    RIGHT_EYE_OUTER = 6
+    LEFT_EAR = 7
+    RIGHT_EAR = 8
+    MOUTH_LEFT = 9
+    MOUTH_RIGHT = 10
+    LEFT_SHOULDER = 11
+    RIGHT_SHOULDER = 12
+    LEFT_ELBOW = 13
+    RIGHT_ELBOW = 14
+    LEFT_WRIST = 15
+    RIGHT_WRIST = 16
+    LEFT_PINKY = 17
+    RIGHT_PINKY = 18
+    LEFT_INDEX = 19
+    RIGHT_INDEX = 20
+    LEFT_THUMB = 21
+    RIGHT_THUMB = 22
+    LEFT_HIP = 23
+    RIGHT_HIP = 24
+    LEFT_KNEE = 25
+    RIGHT_KNEE = 26
+    LEFT_ANKLE = 27
+    RIGHT_ANKLE = 28
+    LEFT_HEEL = 29
+    RIGHT_HEEL = 30
+    LEFT_FOOT_INDEX = 31
+    RIGHT_FOOT_INDEX = 32
 
 
 POSE_CONNECTIONS = [
-    (0, 1), (0, 2),           # nose to eyes
-    (1, 3), (2, 4),           # eyes to ears
-    (5, 6),                   # shoulders
-    (5, 7), (7, 9),           # left arm
-    (6, 8), (8, 10),          # right arm
-    (5, 11), (6, 12),         # torso
-    (11, 12),                 # hips
-    (11, 13), (13, 15),       # left leg
-    (12, 14), (14, 16),       # right leg
-    (15, 24), (16, 25),       # ankles to heels
-    (15, 20), (16, 21),       # ankles to big toes
+    (0, 1), (1, 2), (2, 3),
+    (0, 4), (4, 5), (5, 6),
+    (3, 7), (6, 8),
+    (9, 10),
+    (11, 12),
+    (11, 13), (13, 15),
+    (12, 14), (14, 16),
+    (15, 17), (15, 19), (15, 21),
+    (16, 18), (16, 20), (16, 22),
+    (11, 23), (12, 24),
+    (23, 24),
+    (23, 25), (25, 27), (27, 29), (29, 31),
+    (24, 26), (26, 28), (28, 30), (30, 32)
 ]
 
 
@@ -104,9 +110,10 @@ teaching_style_dict = {
 }
 
 landmark_coordinate_dict = {"frame": []}
-for x in range(NUM_LANDMARKS):
+for x in range(33):
     landmark_coordinate_dict[f"lm{x}_x"] = []
     landmark_coordinate_dict[f"lm{x}_y"] = []
+    landmark_coordinate_dict[f"lm{x}_z"] = []
     landmark_coordinate_dict[f"lm{x}_visibility"] = []
 
 areasofinterest_list = []
@@ -163,26 +170,22 @@ def append_default_logs(frame_idx, label="No Pose Detected"):
     teaching_style_dict["facingstudents"].append(0)
 
 
-def append_landmark_row(frame_idx, keypoints, scores):
-    """
-    keypoints: numpy array (26, 2) of pixel coords, or None
-    scores:    numpy array (26,) of confidence scores, or None
-    """
+def append_landmark_row(frame_idx, landmarks_norm, width, height):
     landmark_coordinate_dict["frame"].append(frame_idx)
 
-    if keypoints is None:
-        for i in range(NUM_LANDMARKS):
+    if landmarks_norm is None:
+        for i in range(33):
             landmark_coordinate_dict[f"lm{i}_x"].append(None)
             landmark_coordinate_dict[f"lm{i}_y"].append(None)
+            landmark_coordinate_dict[f"lm{i}_z"].append(None)
             landmark_coordinate_dict[f"lm{i}_visibility"].append(None)
         return
 
-    for i in range(NUM_LANDMARKS):
-        landmark_coordinate_dict[f"lm{i}_x"].append(clamp_int(keypoints[i, 0]))
-        landmark_coordinate_dict[f"lm{i}_y"].append(clamp_int(keypoints[i, 1]))
-        landmark_coordinate_dict[f"lm{i}_visibility"].append(
-            round(float(scores[i]), 4) if scores is not None else None
-        )
+    for i, lm in enumerate(landmarks_norm):
+        landmark_coordinate_dict[f"lm{i}_x"].append(clamp_int(lm.x * width))
+        landmark_coordinate_dict[f"lm{i}_y"].append(clamp_int(lm.y * height))
+        landmark_coordinate_dict[f"lm{i}_z"].append(lm.z * width)
+        landmark_coordinate_dict[f"lm{i}_visibility"].append(safe_visibility(lm))
 
 
 def draw_pose(frame, pixel_landmarks, visibility=None):
@@ -210,6 +213,19 @@ def draw_pose(frame, pixel_landmarks, visibility=None):
         radius = 4 if vis_ok else 2
         color = (0, 255, 255) if vis_ok else (100, 100, 100)
         cv2.circle(frame, (pt[0], pt[1]), radius, color, -1)
+
+
+def normalize_to_pixels(norm_landmarks, width, height):
+    pixels = []
+    vis = []
+    for lm in norm_landmarks:
+        pixels.append((
+            clamp_int(lm.x * width),
+            clamp_int(lm.y * height),
+            lm.z * width
+        ))
+        vis.append(safe_visibility(lm))
+    return pixels, vis
 
 
 def export_csvs():
@@ -314,42 +330,27 @@ def areasofinterest(video_name):
 # ============================================================
 # DETECTION
 # ============================================================
-def detect_pose(frame_bgr, pose_estimator):
-    """
-    Run RTMPose inference on one frame.
-    Returns (output_frame, landmarks_px, keypoints, scores)
-      landmarks_px : list of (x, y, 0) tuples — same format as before for
-                     classify_pose / track_cog compatibility
-      keypoints    : raw numpy (26, 2) for CSV logging, or None
-      scores       : raw numpy (26,) confidence scores, or None
-    """
+def detect_pose(frame_bgr, landmarker, timestamp_ms):
+    height, width = frame_bgr.shape[:2]
+
+    image_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
     students_aoi = get_aoi(1)
-    frame_input = frame_bgr.copy()
     if students_aoi is not None:
-        cv2.rectangle(frame_input,
-                      students_aoi[0], students_aoi[1], (0, 0, 0), -1)
+        cv2.rectangle(image_rgb, students_aoi[0], students_aoi[1], (0, 0, 0), -1)
 
-    # RTMPose returns (N, 26, 2) keypoints and (N, 26) scores
-    keypoints_all, scores_all = pose_estimator(frame_input)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+    result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-    if keypoints_all is None or len(keypoints_all) == 0:
-        return frame_bgr, None, None, None
+    if not result.pose_landmarks:
+        return frame_bgr, None, None, result
 
-    # take first person only
-    keypoints = keypoints_all[0]   # (26, 2)
-    scores    = scores_all[0]      # (26,)
-
-    # build landmarks_px as list of (x, y, 0) for downstream compatibility
-    landmarks_px = [
-        (clamp_int(keypoints[i, 0]), clamp_int(keypoints[i, 1]), 0)
-        for i in range(NUM_LANDMARKS)
-    ]
+    norm_landmarks = result.pose_landmarks[0]
+    pixel_landmarks, visibility = normalize_to_pixels(norm_landmarks, width, height)
 
     output = frame_bgr.copy()
-    visibility = [float(s) for s in scores]
-    draw_pose(output, landmarks_px, visibility)
-
-    return output, landmarks_px, keypoints, scores
+    draw_pose(output, pixel_landmarks, visibility)
+    return output, pixel_landmarks, norm_landmarks, result
 
 
 # ============================================================
@@ -664,12 +665,19 @@ def main():
     global areasofinterest_list, frame_width, frame_height
     global teaching_style_dict, landmark_coordinate_dict, list_of_COG
 
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(
+            f"Model file not found: {MODEL_PATH}\n"
+            f"Download a Pose Landmarker .task model and place it next to this script."
+        )
+
     # ---- PATCH 2: Reset dicts for clean runs when called multiple times ----
     teaching_style_dict = {k: [] for k in teaching_style_dict}
     landmark_coordinate_dict = {"frame": []}
-    for x in range(NUM_LANDMARKS):
+    for x in range(33):
         landmark_coordinate_dict[f"lm{x}_x"] = []
         landmark_coordinate_dict[f"lm{x}_y"] = []
+        landmark_coordinate_dict[f"lm{x}_z"] = []
         landmark_coordinate_dict[f"lm{x}_visibility"] = []
     list_of_COG = []
 
@@ -714,81 +722,81 @@ def main():
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, video_fps, (frame_width, frame_height))
 
-    # ---- RTMPose model init ----
-    if not os.path.exists(RTMPOSE_DET) or not os.path.exists(RTMPOSE_POSE):
-        raise FileNotFoundError(
-            "RTMPose model files not found in rtmlib cache.\n"
-            "Run this once to download them:\n"
-            "  python -c \"from rtmlib import Body; Body(mode='performance', backend='onnxruntime', device='cpu')\""
-        )
+    BaseOptions = mp.tasks.BaseOptions
+    PoseLandmarker = mp.tasks.vision.PoseLandmarker
+    PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
+    RunningMode = mp.tasks.vision.RunningMode
 
-    pose_estimator = Body(
-        det=RTMPOSE_DET,
-        det_input_size=(640, 640),
-        pose=RTMPOSE_POSE,
-        pose_input_size=(192, 256),
-        backend=RTMPOSE_BACKEND,
-        device=RTMPOSE_DEVICE,
-        to_openpose=False,
+    options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=RunningMode.VIDEO,
+        num_poses=NUM_POSES,
+        min_pose_detection_confidence=MIN_POSE_DET_CONF,
+        min_pose_presence_confidence=MIN_POSE_PRES_CONF,
+        min_tracking_confidence=MIN_TRACK_CONF,
+        output_segmentation_masks=False,
     )
 
     landmarks_history = []
     running_frame_count = 0
 
-    with tqdm(total=total_frame_count, desc="Analyzing", unit="frame") as pbar:
-        while video.isOpened():
-            start_time = datetime.datetime.now()
-            ok, frame = video.read()
-            if not ok:
-                break
-
-            running_frame_count += 1
-
-            frame_out, landmarks_px, keypoints, scores = detect_pose(frame, pose_estimator)
-
-            if landmarks_px is not None:
-                landmarks_history.append(landmarks_px)
-                if len(landmarks_history) > 60:
-                    landmarks_history.pop(0)
-
-                frame_out = classify_pose(
-                    landmarks_px,
-                    frame_out,
-                    landmarks_history,
-                    running_frame_count
-                )
-
-                frame_out = track_cog(landmarks_px, frame_out)
-
-                append_landmark_row(running_frame_count, keypoints, scores)
-            else:
-                append_default_logs(running_frame_count)
-                append_landmark_row(running_frame_count, None, None)
-
-            frame_out = draw_aois(frame_out)
-            frame_out = blur_lower_region(frame_out)
-
-            end_time = datetime.datetime.now()
-            delta = (end_time - start_time).total_seconds()
-            fps = 0.0
-            if delta > 0:
-                fps = 1.0 / delta
-                cv2.putText(frame_out, f"FPS: {fps:.2f}", (10, frame_height - 20),
-                            cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
-                pbar.set_postfix(fps=f"{fps:.2f}")
-
-            if SHOW_PREVIEW:
-                cv2.imshow("Pose Detection", frame_out)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+    with PoseLandmarker.create_from_options(options) as landmarker:
+        with tqdm(total=total_frame_count, desc="Analyzing", unit="frame") as pbar:
+            while video.isOpened():
+                start_time = datetime.datetime.now()
+                ok, frame = video.read()
+                if not ok:
                     break
 
-            out.write(frame_out)
-            export_csvs()
-            pbar.update(1)
+                running_frame_count += 1
 
-            # ---- PATCH 4: Report progress to GUI if callback is set ----
-            if PROGRESS_CALLBACK:
-                PROGRESS_CALLBACK(running_frame_count, total_frame_count, fps)
+                timestamp_ms = int((running_frame_count / max(video_fps, 1e-6)) * 1000)
+
+                frame_out, landmarks_px, landmarks_norm, _ = detect_pose(frame, landmarker, timestamp_ms)
+
+                if landmarks_px is not None:
+                    landmarks_history.append(landmarks_px)
+                    if len(landmarks_history) > 60:
+                        landmarks_history.pop(0)
+
+                    frame_out = classify_pose(
+                        landmarks_px,
+                        frame_out,
+                        landmarks_history,
+                        running_frame_count
+                    )
+
+                    frame_out = track_cog(landmarks_px, frame_out)
+
+                    append_landmark_row(running_frame_count, landmarks_norm, frame_width, frame_height)
+                else:
+                    append_default_logs(running_frame_count)
+                    append_landmark_row(running_frame_count, None, frame_width, frame_height)
+
+                frame_out = draw_aois(frame_out)
+                frame_out = blur_lower_region(frame_out)
+
+                end_time = datetime.datetime.now()
+                delta = (end_time - start_time).total_seconds()
+                fps = 0.0
+                if delta > 0:
+                    fps = 1.0 / delta
+                    cv2.putText(frame_out, f"FPS: {fps:.2f}", (10, frame_height - 20),
+                                cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
+                    pbar.set_postfix(fps=f"{fps:.2f}")
+
+                if SHOW_PREVIEW:
+                    cv2.imshow("Pose Detection", frame_out)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+
+                out.write(frame_out)
+                export_csvs()
+                pbar.update(1)
+
+                # ---- PATCH 4: Report progress to GUI if callback is set ----
+                if PROGRESS_CALLBACK:
+                    PROGRESS_CALLBACK(running_frame_count, total_frame_count, fps)
 
     video.release()
     out.release()

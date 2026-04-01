@@ -1,14 +1,3 @@
-mediapipe==0.10.33
-opencv-python==4.13.0.92
-PyQt5==5.15.11
-torch==2.11.0
-torchaudio==2.11.0
-openai-whisper==20250625
-python-docx==1.2.0
-pandas==3.0.1
-numpy==2.4.4
-tqdm==4.66.1
-openai
-google-api-python-client
-google-auth
-librosa
+dash>=2.14.0
+plotly>=5.18.0
+pandas>=2.0.0
