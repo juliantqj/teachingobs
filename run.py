@@ -3,6 +3,7 @@ ACAI — run.py
 Entry point. Run this file to launch the application.
 """
 
+import torch
 import sys
 from PyQt5.QtWidgets import QApplication
 from gui.app import MainWindow

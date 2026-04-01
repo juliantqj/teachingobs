@@ -8,7 +8,7 @@ Sub-layers:
   4C — Prosody: linguistic (GPT) + acoustic (librosa)
 
 Inputs:  segments_csv, transcript_txt, audio_path
-Outputs: blooms_classification.csv, gpt_summary_report.json
+Outputs: blooms_classification.csv, acoustic_prosody.csv, gpt_summary_report.json
 """
 
 import csv
@@ -115,7 +115,6 @@ def run_blooms_classification(segments: list, output_dir: str,
             parsed = json.loads(raw)
             results = parsed.get("results", [])
         except json.JSONDecodeError:
-            # fallback: mark all in batch as unclassified
             results = [
                 {"segment": s["segment"], "blooms_level": "Unclassified",
                  "confidence": 0.0, "reasoning": "Parse error"}
@@ -124,7 +123,6 @@ def run_blooms_classification(segments: list, output_dir: str,
 
         all_results.extend(results)
 
-    # merge with original segment data for timestamps
     seg_lookup = {int(s["segment"]): s for s in segments}
 
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
@@ -168,9 +166,9 @@ def run_content_summary(full_text: str, progress_callback=None, api_key: str = N
     if progress_callback:
         progress_callback("Generating lecture content summary...")
 
-    client = _get_client()
+    # FIX: api_key was not being passed to _get_client previously
+    client = _get_client(api_key)
 
-    # truncate if extremely long (GPT-4o context is large but be safe)
     text = full_text[:12000] if len(full_text) > 12000 else full_text
 
     raw = _chat(client, SUMMARY_SYSTEM, text, json_mode=True)
@@ -225,10 +223,12 @@ def run_linguistic_prosody(full_text: str, progress_callback=None, api_key: str 
 # 4C — PROSODY: ACOUSTIC (librosa)
 # ============================================================
 def run_acoustic_prosody(audio_path: str, segments: list,
+                          output_dir: str = None,
                           progress_callback=None) -> dict:
     """
     Compute acoustic speech features from raw audio + segment timestamps.
     Falls back gracefully if librosa is not installed.
+    Also exports acoustic_prosody.csv if output_dir is provided.
     """
     try:
         import librosa
@@ -251,20 +251,27 @@ def run_acoustic_prosody(audio_path: str, segments: list,
         if duration > 0:
             word_count = len(str(seg.get("text", "")).split())
             speech_rates.append(word_count / duration)
+        else:
+            speech_rates.append(0.0)
 
     mean_speech_rate = round(float(sum(speech_rates) / len(speech_rates)), 3) if speech_rates else 0.0
 
     # ---- pause detection (gaps between segments) ----
     pauses = []
     sorted_segs = sorted(segments, key=lambda s: float(s.get("start", 0)))
+    pause_after = {}   # pause duration after each segment index
     for i in range(1, len(sorted_segs)):
         gap = float(sorted_segs[i].get("start", 0)) - float(sorted_segs[i - 1].get("end", 0))
-        if gap > 0.3:   # only count pauses > 300ms
+        if gap > 0.3:
             pauses.append(round(gap, 3))
+            pause_after[i - 1] = round(gap, 3)
+        else:
+            pause_after[i - 1] = 0.0
+    pause_after[len(sorted_segs) - 1] = 0.0   # last segment has no following pause
 
-    # ---- energy variance (proxy for vocal expressiveness) ----
-    rms        = librosa.feature.rms(y=y)[0]
-    energy_var = round(float(rms.var()), 6)
+    # ---- energy variance ----
+    rms         = librosa.feature.rms(y=y)[0]
+    energy_var  = round(float(rms.var()), 6)
     energy_mean = round(float(rms.mean()), 6)
 
     # ---- pitch stats ----
@@ -273,15 +280,14 @@ def run_acoustic_prosody(audio_path: str, segments: list,
             y, fmin=librosa.note_to_hz("C2"),
             fmax=librosa.note_to_hz("C7"), sr=sr
         )
-        import numpy as np
         voiced_f0   = f0[voiced_flag] if f0 is not None else []
-        pitch_mean  = round(float(np.mean(voiced_f0)), 2) if len(voiced_f0) > 0 else 0.0
+        pitch_mean  = round(float(np.mean(voiced_f0)), 2)  if len(voiced_f0) > 0 else 0.0
         pitch_range = round(float(np.max(voiced_f0) - np.min(voiced_f0)), 2) if len(voiced_f0) > 0 else 0.0
     except Exception:
         pitch_mean  = 0.0
         pitch_range = 0.0
 
-    return {
+    result = {
         "mean_speech_rate_wps":    mean_speech_rate,
         "speech_rate_per_segment": speech_rates,
         "pause_count":             len(pauses),
@@ -293,6 +299,27 @@ def run_acoustic_prosody(audio_path: str, segments: list,
         "pitch_mean_hz":           pitch_mean,
         "pitch_range_hz":          pitch_range,
     }
+
+    # ---- export per-segment CSV for dashboard ----
+    if output_dir:
+        csv_path = Path(output_dir) / "acoustic_prosody.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["segment", "start", "end", "text",
+                             "speech_rate_wps", "pause_after_sec"])
+            for i, seg in enumerate(sorted_segs):
+                writer.writerow([
+                    seg.get("segment", i),
+                    seg.get("start", ""),
+                    seg.get("end", ""),
+                    seg.get("text", ""),
+                    round(speech_rates[i], 3) if i < len(speech_rates) else 0.0,
+                    pause_after.get(i, 0.0),
+                ])
+        if progress_callback:
+            progress_callback("Acoustic prosody CSV saved.")
+
+    return result
 
 
 # ============================================================
@@ -324,7 +351,9 @@ def run_gpt_analysis(segments_csv: str, transcript_txt: str,
     blooms_csv = run_blooms_classification(segments, str(output_dir), progress_callback, api_key)
     summary    = run_content_summary(full_text, progress_callback, api_key)
     linguistic = run_linguistic_prosody(full_text, progress_callback, api_key)
-    acoustic   = run_acoustic_prosody(audio_path, segments, progress_callback)
+    acoustic   = run_acoustic_prosody(audio_path, segments,
+                                       output_dir=str(output_dir),
+                                       progress_callback=progress_callback)
 
     # ---- assemble final JSON report ----
     report = {
@@ -342,6 +371,7 @@ def run_gpt_analysis(segments_csv: str, transcript_txt: str,
         progress_callback("GPT analysis complete.")
 
     return {
-        "blooms_csv":    blooms_csv,
+        "blooms_csv":     blooms_csv,
+        "acoustic_csv":   str(output_dir / "acoustic_prosody.csv"),
         "summary_report": str(report_path),
     }

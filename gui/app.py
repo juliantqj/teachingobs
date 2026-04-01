@@ -32,6 +32,7 @@ import ACAI_main
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
 import audio_analysis
 import gpt_analysis
+import drive_upload
 
 
 # ============================================================
@@ -107,6 +108,33 @@ class GPTWorker(QThread):
                 session_name=self.session_name,
                 progress_callback=lambda msg: self.status.emit(msg),
                 api_key=self.api_key
+            )
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ============================================================
+# DRIVE WORKER — copies output files to Google Drive sync folder
+# ============================================================
+class DriveWorker(QThread):
+    status   = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+    error    = pyqtSignal(str)
+
+    def __init__(self, output_dir, drive_root, session_name):
+        super().__init__()
+        self.output_dir   = output_dir
+        self.drive_root   = drive_root
+        self.session_name = session_name
+
+    def run(self):
+        try:
+            result = drive_upload.copy_to_drive(
+                output_dir=self.output_dir,
+                session_name=self.session_name,
+                drive_root=self.drive_root,
+                progress_callback=lambda msg: self.status.emit(msg)
             )
             self.finished.emit(result)
         except Exception as e:
@@ -289,7 +317,34 @@ class SidePanel(QWidget):
         self.setFixedWidth(380)
         self.setStyleSheet(f"background-color: {PANEL_BG};")
 
-        layout = QVBoxLayout(self)
+        # ---- outer layout holds the scroll area ----
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{ border: none; background: {PANEL_BG}; }}
+            QScrollBar:vertical {{
+                background: {PANEL_BG}; width: 6px; border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {BORDER}; border-radius: 3px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+        """)
+
+        # ---- inner content widget ----
+        content = QWidget()
+        content.setStyleSheet(f"background-color: {PANEL_BG};")
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
@@ -338,6 +393,24 @@ class SidePanel(QWidget):
         api_file_row.addWidget(self.btn_load_json)
         api_file_row.addWidget(self.btn_load_txt)
         layout.addLayout(api_file_row)
+        layout.addWidget(self._divider())
+
+        # Google Drive folder
+        layout.addWidget(self._section_label("GOOGLE DRIVE FOLDER"))
+        self.drive_label = QLabel("No folder selected")
+        self.drive_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px; font-family: 'Arial';")
+        self.drive_label.setWordWrap(True)
+        drive_row = QHBoxLayout()
+        self.btn_drive = self._make_button("Browse", secondary=True)
+        self.btn_save_drive = self._make_button("Save", secondary=True)
+        self.btn_save_drive.setFixedWidth(70)
+        drive_row.addWidget(self.btn_drive)
+        drive_row.addWidget(self.btn_save_drive)
+        layout.addWidget(self.drive_label)
+        layout.addLayout(drive_row)
+        self.drive_status = QLabel("")
+        self.drive_status.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px; font-family: 'Arial';")
+        layout.addWidget(self.drive_status)
         layout.addWidget(self._divider())
 
         # Video
@@ -501,6 +574,8 @@ class SidePanel(QWidget):
         self.btn_save_key.setEnabled(not running)
         self.btn_load_json.setEnabled(not running)
         self.btn_load_txt.setEnabled(not running)
+        self.btn_drive.setEnabled(not running)
+        self.btn_save_drive.setEnabled(not running)
 
 
 # ============================================================
@@ -510,15 +585,18 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ACAI — Classroom Analysis")
-        self.setMinimumSize(1200, 760)
+        self.setMinimumSize(800, 500)
         self.setStyleSheet(f"background-color: {DARK_BG};")
+        self.showMaximized()
 
         self.video_path    = None
         self.audio_path    = None
         self._worker       = None
         self._audio_worker = None
         self._gpt_worker   = None
+        self._drive_worker = None
         self._output_dir   = None
+        self._drive_root   = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -573,18 +651,21 @@ class MainWindow(QMainWindow):
         self.panel.btn_load_json.clicked.connect(self._load_key_from_json)
         self.panel.btn_load_txt.clicked.connect(self._load_key_from_txt)
         self.panel.api_key_input.textChanged.connect(self._check_ready)
+        self.panel.btn_drive.clicked.connect(self._browse_drive_folder)
+        self.panel.btn_save_drive.clicked.connect(self._save_drive_path)
 
         # load saved config on startup
         self._load_config()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # pass the new available canvas width directly so the frame redraws correctly
-        available_w = self.width() - self.panel.width() - 60   # panel + separator + padding (panel now 380px)
+        if not hasattr(self, 'panel') or not hasattr(self, 'canvas'):
+            return
+        available_w = self.width() - self.panel.width() - 60
         self.canvas._redraw(available_w=max(available_w, 100))
 
     def _load_config(self):
-        """Load saved config and pre-fill API key field."""
+        """Load saved config and pre-fill API key and Drive folder fields."""
         if os.path.exists(CONFIG_PATH):
             try:
                 with open(CONFIG_PATH, "r") as f:
@@ -594,6 +675,17 @@ class MainWindow(QMainWindow):
                     self.panel.api_key_input.setText(key)
                     self.panel.api_key_status.setText("Key loaded from config.")
                     self.panel.api_key_status.setStyleSheet(
+                        f"color: {SUCCESS}; font-size: 10px; font-family: 'Arial';"
+                    )
+                drive = cfg.get("drive_root", "")
+                if drive:
+                    self._drive_root = drive
+                    self.panel.drive_label.setText(drive)
+                    self.panel.drive_label.setStyleSheet(
+                        f"color: {TEXT_PRIMARY}; font-size: 10px; font-family: 'Arial';"
+                    )
+                    self.panel.drive_status.setText("Drive folder loaded from config.")
+                    self.panel.drive_status.setStyleSheet(
                         f"color: {SUCCESS}; font-size: 10px; font-family: 'Arial';"
                     )
             except Exception:
@@ -617,6 +709,43 @@ class MainWindow(QMainWindow):
             json.dump(cfg, f, indent=2)
         self.panel.api_key_status.setText("Key saved ✓")
         self.panel.api_key_status.setStyleSheet(
+            f"color: {SUCCESS}; font-size: 10px; font-family: 'Arial';"
+        )
+
+    def _browse_drive_folder(self):
+        """Browse for the local Google Drive ACAI_Reports folder."""
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Google Drive ACAI_Reports Folder", ""
+        )
+        if not path:
+            return
+        self._drive_root = path
+        self.panel.drive_label.setText(path)
+        self.panel.drive_label.setStyleSheet(
+            f"color: {TEXT_PRIMARY}; font-size: 10px; font-family: 'Arial';"
+        )
+        self.panel.drive_status.setText("Folder selected — click Save to persist.")
+        self.panel.drive_status.setStyleSheet(
+            f"color: {WARNING}; font-size: 10px; font-family: 'Arial';"
+        )
+
+    def _save_drive_path(self):
+        """Save Drive folder path to config.json."""
+        if not self._drive_root:
+            self.panel.drive_status.setText("No folder selected.")
+            return
+        cfg = {}
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r") as f:
+                    cfg = json.load(f)
+            except Exception:
+                pass
+        cfg["drive_root"] = self._drive_root
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+        self.panel.drive_status.setText("Drive folder saved ✓")
+        self.panel.drive_status.setStyleSheet(
             f"color: {SUCCESS}; font-size: 10px; font-family: 'Arial';"
         )
 
@@ -885,26 +1014,88 @@ class MainWindow(QMainWindow):
 
     def _on_gpt_finished(self, result):
         self.panel.progress_bar.setValue(100)
-        self.panel.stage_label.setText("All analysis complete ✓")
+        self.panel.stage_label.setText("GPT analysis complete ✓  —  uploading to Drive...")
         self.panel.stage_label.setStyleSheet(f"color: {SUCCESS};")
-        self.panel.status_label.setText(f"Saved to: {self._output_dir}")
+        self._gpt_worker.quit()
+        self._gpt_worker.wait()
+        self._gpt_worker = None
+        self._start_drive_upload()
+
+    def _start_drive_upload(self):
+        session = self.panel.session_input.text().strip()
+
+        # if no Drive folder configured, skip upload and finish
+        if not self._drive_root:
+            self.panel.stage_label.setText("All analysis complete ✓  (no Drive folder set)")
+            self.panel.stage_label.setStyleSheet(f"color: {SUCCESS};")
+            self.panel.status_label.setText(f"Saved locally to: {self._output_dir}")
+            self.panel.status_label.setStyleSheet(
+                f"color: {SUCCESS}; font-size: 10px; font-family: 'Arial';"
+            )
+            self.panel.set_running(False)
+            QMessageBox.information(
+                self, "Analysis Complete",
+                f"All analysis finished.\n\nOutputs saved locally to:\n{self._output_dir}\n\n"
+                f"No Google Drive folder configured — files not uploaded."
+            )
+            return
+
+        self.panel.stage_label.setText("Uploading to Google Drive...")
+        self.panel.stage_label.setStyleSheet(f"color: {WARNING};")
+        self.panel.progress_bar.setValue(0)
+        self.panel.status_label.setText("Copying files to Drive sync folder...")
+        self.panel.status_label.setStyleSheet(
+            f"color: {WARNING}; font-size: 10px; font-family: 'Arial';"
+        )
+
+        self._drive_worker = DriveWorker(self._output_dir, self._drive_root, session)
+        self._drive_worker.status.connect(lambda msg: self.panel.stage_label.setText(msg))
+        self._drive_worker.finished.connect(self._on_drive_finished)
+        self._drive_worker.error.connect(self._on_drive_error)
+        self._drive_worker.start()
+
+    def _on_drive_finished(self, result):
+        self.panel.progress_bar.setValue(100)
+        self.panel.stage_label.setText("All complete ✓  — files uploaded to Drive")
+        self.panel.stage_label.setStyleSheet(f"color: {SUCCESS};")
+        self.panel.status_label.setText(f"Drive: {result['drive_folder_path']}")
         self.panel.status_label.setStyleSheet(
             f"color: {SUCCESS}; font-size: 10px; font-family: 'Arial';"
         )
         self.panel.set_running(False)
-        self._gpt_worker.quit()
-        self._gpt_worker.wait()
-        self._gpt_worker = None
+        self._drive_worker.quit()
+        self._drive_worker.wait()
+        self._drive_worker = None
+
+        skipped_msg = ""
+        if result.get("skipped_files"):
+            skipped_msg = f"\n\nSkipped (not found):\n" + "\n".join(f"  • {f}" for f in result["skipped_files"])
+
         QMessageBox.information(
             self, "Analysis Complete",
-            f"All analysis finished.\n\nOutputs saved to:\n{self._output_dir}\n\n"
-            f"Files:\n"
-            f"  • reportsourcefile_landmarkcoordinates.csv\n"
-            f"  • teachingstyle_output.csv\n"
-            f"  • reportsourcefile_center_of_gravity.csv\n"
-            f"  • *_segments.csv\n"
-            f"  • blooms_classification.csv\n"
-            f"  • gpt_summary_report.json"
+            f"All analysis finished.\n\n"
+            f"Local output:\n{self._output_dir}\n\n"
+            f"Drive folder:\n{result['drive_folder_path']}\n\n"
+            f"Uploaded: {len(result['copied_files'])} files"
+            f"{skipped_msg}"
+        )
+
+    def _on_drive_error(self, message):
+        self.panel.stage_label.setText("Drive upload failed")
+        self.panel.stage_label.setStyleSheet(f"color: {ACCENT};")
+        self.panel.status_label.setText(f"Drive error: {message}")
+        self.panel.status_label.setStyleSheet(
+            f"color: {ACCENT}; font-size: 10px; font-family: 'Arial';"
+        )
+        self.panel.set_running(False)
+        if self._drive_worker:
+            self._drive_worker.quit()
+            self._drive_worker.wait()
+        self._drive_worker = None
+        QMessageBox.warning(
+            self, "Drive Upload Failed",
+            f"Analysis completed but Drive upload failed:\n\n{message}\n\n"
+            f"Your files are saved locally at:\n{self._output_dir}"
         )
 
     def _on_gpt_error(self, message):
