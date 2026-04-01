@@ -714,13 +714,19 @@ def main():
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, video_fps, (frame_width, frame_height))
 
-    # ---- RTMPose model init ----
+    # ---- RTMPose model init — auto-download if not in cache ----
     if not os.path.exists(RTMPOSE_DET) or not os.path.exists(RTMPOSE_POSE):
-        raise FileNotFoundError(
-            "RTMPose model files not found in rtmlib cache.\n"
-            "Run this once to download them:\n"
-            "  python -c \"from rtmlib import Body; Body(mode='performance', backend='onnxruntime', device='cpu')\""
+        print("RTMPose model files not found in cache. Downloading now...")
+        Body(
+            det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip",
+            det_input_size=(640, 640),
+            pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.zip",
+            pose_input_size=(192, 256),
+            backend="onnxruntime",
+            device="cpu",
+            to_openpose=False,
         )
+        print("Download complete.")
 
     pose_estimator = Body(
         det=RTMPOSE_DET,
