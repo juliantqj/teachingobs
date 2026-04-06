@@ -10,12 +10,9 @@ PythonAnywhere WSGI config:
 import sys
 import os
 
-# ensure project root is on path so data.py and layouts can import correctly
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dash import Dash, html, dcc, Input, Output
-
-# layouts
 from layouts import overview, comparison
 
 # ============================================================
@@ -27,7 +24,6 @@ app = Dash(
     meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
 )
 
-# expose Flask server for PythonAnywhere WSGI
 server = app.server
 
 # ============================================================
@@ -56,7 +52,6 @@ app.layout = html.Div([
             className="dash-tabs",
         ),
 
-        # tab content
         html.Div(id="tab-content"),
 
     ], id="app-container"),
@@ -65,7 +60,7 @@ app.layout = html.Div([
 
 
 # ============================================================
-# TAB ROUTING CALLBACK
+# CALLBACKS
 # ============================================================
 @app.callback(
     Output("tab-content", "children"),
@@ -80,7 +75,7 @@ def render_tab(tab):
 
 
 # ============================================================
-# REGISTER CALLBACKS
+# REGISTER LAYOUT CALLBACKS
 # ============================================================
 overview.register_callbacks(app)
 comparison.register_callbacks(app)

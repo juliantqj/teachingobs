@@ -57,7 +57,7 @@ def _chat(client, system_prompt: str, user_prompt: str,
 # ============================================================
 # 4A — BLOOM'S TAXONOMY CLASSIFICATION
 # ============================================================
-BLOOMS_SYSTEM = """You are an educational analyst classifying teacher utterances by Bloom's Taxonomy cognitive level.
+BLOOMS_SYSTEM = """You are an educational analyst classifying teacher questions by Bloom's Taxonomy cognitive level.
 
 Levels (use exactly these labels):
   Remember    — recalling facts, definitions, basic knowledge
@@ -67,7 +67,7 @@ Levels (use exactly these labels):
   Evaluate    — justifying, critiquing, making judgements
   Create      — designing, constructing, producing new ideas
 
-You will receive a JSON array of transcript segments. Return a JSON object with key "results" 
+You will receive a JSON array of question segments from a teacher's transcript. Return a JSON object with key "results" 
 containing an array of objects, one per segment, each with:
   - "segment": the segment index (integer)
   - "blooms_level": one of the six levels above
@@ -76,22 +76,51 @@ containing an array of objects, one per segment, each with:
 
 Return ONLY valid JSON, no markdown, no preamble."""
 
+QUESTION_WORDS = {
+    "what", "how", "why", "when", "where", "which", "who",
+    "could", "would", "can", "does", "did", "do", "is", "are",
+    "should", "will", "have", "has", "was", "were"
+}
+
+
+def _is_question(text: str, min_words: int = 3) -> bool:
+    """Return True if the segment looks like a question with at least min_words words."""
+    text = text.strip()
+    words = text.split()
+    if len(words) < min_words:
+        return False
+    # ends with question mark
+    if text.endswith("?"):
+        return True
+    # starts with a question word
+    if words[0].lower() in QUESTION_WORDS:
+        return True
+    return False
+
 
 def run_blooms_classification(segments: list, output_dir: str,
                                progress_callback=None, api_key: str = None) -> str:
     """
-    Classify each segment by Bloom's level.
-    Batches segments to stay within token limits.
+    Classify teacher questions by Bloom's level.
+    Only segments identified as questions (min 3 words) are classified.
     Returns path to blooms_classification.csv.
     """
     client     = _get_client(api_key)
     output_dir = Path(output_dir)
     output_csv = output_dir / "blooms_classification.csv"
 
-    BATCH_SIZE = 30
-    all_results = []
+    # filter to questions only
+    question_segments = [s for s in segments if _is_question(str(s.get("text", "")))]
 
-    batches = [segments[i:i + BATCH_SIZE] for i in range(0, len(segments), BATCH_SIZE)]
+    if progress_callback:
+        progress_callback(
+            f"Bloom's classification — {len(question_segments)} questions identified from {len(segments)} segments"
+        )
+
+    BATCH_SIZE  = 30
+    all_results = []
+    batches     = [question_segments[i:i + BATCH_SIZE]
+                   for i in range(0, len(question_segments), BATCH_SIZE)]
 
     for batch_idx, batch in enumerate(batches):
         if progress_callback:
@@ -123,7 +152,7 @@ def run_blooms_classification(segments: list, output_dir: str,
 
         all_results.extend(results)
 
-    seg_lookup = {int(s["segment"]): s for s in segments}
+    seg_lookup = {int(s["segment"]): s for s in question_segments}
 
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -151,10 +180,10 @@ def run_blooms_classification(segments: list, output_dir: str,
 # ============================================================
 # 4B — LECTURE CONTENT SUMMARY
 # ============================================================
-SUMMARY_SYSTEM = """You are an educational analyst. Given a lecture transcript, produce a structured summary.
+SUMMARY_SYSTEM = """You are an educational analyst. Given a lecture transcript, produce a structured summary focused on content.
 Return a JSON object with exactly these keys:
-  "content_summary": a 3–5 sentence summary of the lecture content
-  "key_topics": a list of 3–8 key topics or concepts covered (strings)
+  "content_summary": a 3–5 sentence summary of the specific subject matter and content covered
+  "key_concepts": a list of 3–8 specific concepts, principles, or terminology taught (strings) — be precise, not broad topic areas
   "learning_objectives_inferred": a list of 2–4 likely learning objectives (strings)
   "lecture_duration_estimate": estimated lecture duration based on content depth (e.g. "45 minutes")
 

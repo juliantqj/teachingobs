@@ -5,12 +5,41 @@ Tab 1: Single session overview.
 
 import plotly.graph_objects as go
 import plotly.express as px
-from dash import html, dcc, callback, Input, Output
+from dash import html, dcc, callback, Input, Output, State
 import pandas as pd
 import os
+import threading
 
 import sys, os as _os
 sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import data as D
+
+# shared refresh state
+_refresh_log  = []
+_refresh_done = [False]   # list so it's mutable from nested function
+_refresh_lock = threading.Lock()
+
+
+def _run_refresh():
+    try:
+        import refresh_data as RD
+        if not RD.is_configured():
+            with _refresh_lock:
+                _refresh_log.append("Google Drive not configured. Set DRIVE_FOLDER_ID in refresh_data.py.")
+                _refresh_done[0] = True
+            return
+
+        def _cb(msg):
+            with _refresh_lock:
+                _refresh_log.append(msg)
+
+        RD.sync_from_drive(progress_callback=_cb)
+        with _refresh_lock:
+            _refresh_done[0] = True
+    except Exception as e:
+        with _refresh_lock:
+            _refresh_log.append(f"Refresh failed: {e}")
+            _refresh_done[0] = True
 import data as D
 
 # ============================================================
@@ -44,7 +73,7 @@ AOI_COLOURS = {
 }
 
 STYLE_COLOURS = {
-    "Active Gesturing": ACCENT,
+    "Active Teaching": ACCENT,
     "Passive Teaching": "#4e6d8c",
     "No Pose Detected": "#2a3a4a",
 }
@@ -306,7 +335,7 @@ def layout():
 
     return html.Div([
 
-        # ---- selector bar ----
+        # ---- selector bar with inline Refresh button ----
         html.Div([
             html.Label("SESSION"),
             dcc.Dropdown(
@@ -314,8 +343,38 @@ def layout():
                 options=options,
                 value=default,
                 clearable=False,
-                style={"minWidth": "320px"},
+                style={"minWidth": "320px", "flex": "1"},
             ),
+            html.Button(
+                "Refresh Data",
+                id="btn-refresh",
+                n_clicks=0,
+                style={
+                    "background": "transparent",
+                    "border": f"1px solid {BORDER}",
+                    "borderRadius": "4px",
+                    "color": TEXT,
+                    "padding": "6px 16px",
+                    "fontSize": "11px",
+                    "fontWeight": "600",
+                    "letterSpacing": "2px",
+                    "textTransform": "uppercase",
+                    "cursor": "pointer",
+                    "fontFamily": "-apple-system, Segoe UI, Arial",
+                    "whiteSpace": "nowrap",
+                }
+            ),
+            html.Span(
+                id="refresh-status",
+                style={
+                    "fontSize": "11px",
+                    "color": MUTED,
+                    "fontFamily": "-apple-system, Segoe UI, Arial",
+                    "whiteSpace": "nowrap",
+                }
+            ),
+            dcc.Interval(id="refresh-poll", interval=1500, n_intervals=0, disabled=True),
+            dcc.Store(id="refresh-store", data={"running": False, "log": [], "done": False}),
         ], className="selector-bar"),
 
         # ---- content (populated by callback) ----
@@ -328,6 +387,62 @@ def layout():
 # CALLBACKS
 # ============================================================
 def register_callbacks(app):
+
+    @app.callback(
+        Output("refresh-store", "data"),
+        Output("refresh-poll",  "disabled"),
+        Input("btn-refresh", "n_clicks"),
+        State("refresh-store", "data"),
+        prevent_initial_call=True,
+    )
+    def start_refresh(n_clicks, store):
+        import threading
+        if store.get("running"):
+            return store, False
+        with _refresh_lock:
+            _refresh_log.clear()
+            _refresh_log.append("Connecting to Google Drive...")
+            _refresh_done[0] = False
+        t = threading.Thread(target=_run_refresh, daemon=True)
+        t.start()
+        return {"running": True, "log": [], "done": False}, False
+
+    @app.callback(
+        Output("refresh-status", "children"),
+        Output("refresh-status", "style"),
+        Output("refresh-store",  "data", allow_duplicate=True),
+        Output("refresh-poll",   "disabled", allow_duplicate=True),
+        Output("ov-session-dropdown", "options"),
+        Output("ov-session-dropdown", "value"),
+        Input("refresh-poll",    "n_intervals"),
+        State("refresh-store",   "data"),
+        prevent_initial_call=True,
+    )
+    def poll_refresh(n, store):
+        sessions = D.list_sessions()
+        options  = [{"label": s, "value": s} for s in sessions]
+        default  = sessions[0] if sessions else None
+
+        if not store.get("running"):
+            return "", {"color": MUTED}, store, True, options, default
+
+        with _refresh_lock:
+            log  = list(_refresh_log)
+            done = _refresh_done[0]
+
+        latest = log[-1] if log else "Running..."
+        colour = SUCCESS if done and "fail" not in latest.lower() and "error" not in latest.lower() else (
+                 "#e74c3c" if done else WARNING
+        )
+        style = {
+            "fontSize": "11px", "color": colour,
+            "fontFamily": "-apple-system, Segoe UI, Arial",
+            "whiteSpace": "nowrap",
+        }
+
+        if done:
+            return latest, style, {"running": False, "log": log, "done": True}, True, options, default
+        return latest, style, store, False, options, default
 
     @app.callback(
         Output("ov-content", "children"),
@@ -380,25 +495,26 @@ def register_callbacks(app):
 
         # ---- content summary card ----
         summary_card = html.Div([
-            html.Div("LECTURE SUMMARY", className="card-title"),
+            html.Div("CONTENT SUMMARY", className="card-title"),
             html.P(content_summary.get("content_summary", "No summary available."), className="prose"),
             html.Br(),
-            html.Div("KEY TOPICS", className="card-title"),
+            html.Div("KEY CONCEPTS", className="card-title"),
             html.Div([
                 html.Span(t, className="tag tag-accent")
-                for t in content_summary.get("key_topics", [])
+                for t in content_summary.get("key_concepts",
+                    content_summary.get("key_topics", []))  # fallback for old sessions
             ], className="tag-list"),
         ], className="card")
 
         # ---- teaching style section ----
-        active_pct = style_summary.get("Active Gesturing", 0)
+        active_pct = style_summary.get("Active Teaching", 0)
         passive_pct = style_summary.get("Passive Teaching", 0)
 
         teaching_card = html.Div([
             html.Div("TEACHING STYLE", className="card-title"),
             html.Div([
                 html.Div([html.Div(f"{active_pct}%", className="metric-value"),
-                          html.Div("ACTIVE GESTURING", className="metric-label")], className="metric-tile"),
+                          html.Div("ACTIVE TEACHING", className="metric-label")], className="metric-tile"),
                 html.Div([html.Div(f"{passive_pct}%", className="metric-value"),
                           html.Div("PASSIVE TEACHING", className="metric-label")], className="metric-tile"),
             ], className="metric-grid"),
@@ -430,7 +546,7 @@ def register_callbacks(app):
 
         # ---- blooms section ----
         blooms_card = html.Div([
-            html.Div("BLOOM'S TAXONOMY", className="card-title"),
+            html.Div("BLOOM'S TAXONOMY — QUESTION ANALYSIS", className="card-title"),
             html.Div([
                 html.Div([
                     html.Div("DISTRIBUTION", className="card-title"),
@@ -502,24 +618,11 @@ def register_callbacks(app):
                     html.Div("HEDGE LANGUAGE FREQ.", className="metric-label"),
                 ], className="metric-tile"),
             ], className="metric-grid"),
-            html.P(linguistic.get("clarity_notes", ""), className="prose-muted"),
-            html.Br(),
+            html.Div("STRENGTHS", className="card-title"),
             html.Div([
-                html.Div([
-                    html.Div("STRENGTHS", className="card-title"),
-                    html.Div([
-                        html.Span(s, className="tag tag-accent")
-                        for s in linguistic.get("communication_strengths", [])
-                    ], className="tag-list"),
-                ], style={"flex": "1"}),
-                html.Div([
-                    html.Div("AREAS FOR IMPROVEMENT", className="card-title"),
-                    html.Div([
-                        html.Span(s, className="tag")
-                        for s in linguistic.get("areas_for_improvement", [])
-                    ], className="tag-list"),
-                ], style={"flex": "1"}),
-            ], style={"display": "flex", "gap": "24px"}),
+                html.Span(s, className="tag tag-accent")
+                for s in linguistic.get("communication_strengths", [])
+            ], className="tag-list"),
         ], className="card")
 
         return html.Div([
